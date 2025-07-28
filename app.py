@@ -4,7 +4,7 @@ from datetime import datetime
 
 st.set_page_config(layout="wide")
 
-sheet_url = st.secrets["gspread"]["sheet_url"]
+sheet_url = st.secrets["google_sheets"]["url"]
 
 CSV_URL = sheet_url
 
