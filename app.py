@@ -4,7 +4,9 @@ from datetime import datetime
 
 st.set_page_config(layout="wide")
 
-CSV_URL = "https://docs.google.com/spreadsheets/d/1ljbu16X2lTaAQtE86iFBSkPpbWPOa-R0IKe7QhT9xH8/export?format=csv"
+sheet_url = st.secrets["gspread"]["sheet_url"]
+
+CSV_URL = sheet_url
 
 # 🔁 새로고침 버튼
 st.title("📦 매출/매입 요약 대시보드")
