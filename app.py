@@ -20,6 +20,8 @@ if st.button("새로고침"):
 def load_data():
     df = pd.read_csv(CSV_URL)
 
+
+    df.columns = df.columns.str.strip()
     # Unnamed 컬럼 제거
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
 
