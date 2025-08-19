@@ -13,7 +13,7 @@ FX_USD_CSV_URL = st.secrets["google_sheets"]["fx_usd_url"]
 FX_JPY_CSV_URL = st.secrets["google_sheets"]["fx_jpy_url"]
 
 # 🔁 새로고침 버튼
-st.title("매출/매입 요약 대시보드")
+st.title("SaemahTech Dashboard")
 if st.button("새로고침"):
     st.cache_data.clear()
 
