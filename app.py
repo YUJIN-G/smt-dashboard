@@ -1,11 +1,16 @@
+from collections import deque
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
+
 
 st.set_page_config(layout="wide")
 
 sheet_url = st.secrets["google_sheets"]["url"]
 CSV_URL = sheet_url
+FX_USD_CSV_URL = st.secrets["google_sheets"]["fx_usd_url"]  
+FX_JPY_CSV_URL = st.secrets["google_sheets"]["fx_jpy_url"]
 
 # 🔁 새로고침 버튼
 st.title("매출/매입 요약 대시보드")
@@ -41,6 +46,8 @@ def load_data():
 
 
 df = load_data()
+
+
 
 def highlight_type_cell(val):
     if val == "판매":
@@ -259,3 +266,175 @@ def render_monthly_summary(df):
 # 3️⃣ 월별 매출 및 영업이익 추이
 with st.expander("📈 월별 매출 및 영업이익 추이", expanded=False):
     render_monthly_summary(df)
+    
+    
+    
+    
+    
+# 외환 차손 계산    
+
+@st.cache_data
+def load_fx_left_table():
+    """두번째 탭(좌측 열: 입출금/내용/입금/출금/환율/원화/외화잔액) 불러오기"""
+    fx = pd.read_csv(FX_USD_CSV_URL)
+    fx.columns = fx.columns.str.strip()
+    # Unnamed 제거
+    fx = fx.loc[:, ~fx.columns.str.startswith("Unnamed")]
+    # 날짜
+    if "입출금" in fx.columns:
+        fx["입출금"] = pd.to_datetime(fx["입출금"], errors="coerce")
+    # 숫자(콤마/하이픈 제거)
+    for col in ["입금", "출금", "환율"]:
+        if col in fx.columns:
+            fx[col] = fx[col].astype(str).str.replace(r"[^\d\.-]", "", regex=True).replace({"": "0", "-": "0"}).astype(float)
+    # 설명 컬럼 표준화
+    if "내용" not in fx.columns:
+        fx["내용"] = ""
+    return fx
+
+from collections import deque
+from decimal import Decimal, ROUND_HALF_UP
+
+def _to_dec(x):
+    if pd.isna(x): return Decimal("0")
+    s = str(x).strip().replace(",", "")
+    if s in ["", "-", "–"]: return Decimal("0")
+    return Decimal(s)
+
+def _round_krw(x: Decimal) -> int:
+    return int(x.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+def compute_fx_fifo_kor(fx: pd.DataFrame) -> pd.DataFrame:
+    """
+    입력: 컬럼 = 입출금(날짜), 내용, 입금, 출금, 환율  (좌측 표)
+    규칙: 선입선출(FIFO), 같은 날 입금분으로 같은 날 출금된 금액은 환차손익 0
+    출력: 거래별 환차손익 테이블
+    """
+    df = fx.copy()
+    df = df.rename(columns={"입출금":"date", "내용":"desc", "입금":"deposit", "출금":"withdraw", "환율":"rate"})
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ["deposit","withdraw","rate"]:
+        df[c] = df[c].map(_to_dec)
+
+    df = df.sort_values(["date"]).reset_index(drop=True)
+
+    lots = deque()   # 보유 로트: {amount, rate, date, desc}
+    out = []
+
+    for _, r in df.iterrows():
+        date, dep, wdr, rate, desc = r["date"], r["deposit"], r["withdraw"], r["rate"], r["desc"]
+
+        if dep > 0:
+            lots.append({"amount": dep, "rate": rate, "date": date, "desc": desc})
+            out.append({
+                "date": date.date(), "desc": desc, "type":"입금",
+                "usd": float(dep), "book_rate": float(rate),
+                "book_krw": _round_krw(dep*rate),
+                "fifo_cost_krw": _round_krw(dep*rate),
+                "fx_gain_krw": 0, "fifo_breakdown":""
+            })
+            continue
+
+        if wdr > 0:
+            remain = Decimal(wdr)
+            book_krw = Decimal("0"); cost_krw = Decimal("0")
+            breakdown = []
+
+            # 1) 같은 날 입금분 우선 소진 (환차손익 0)
+            i = 0
+            while remain > 0 and i < len(lots):
+                lot = lots[i]
+                if lot["date"].date() != date.date():
+                    i += 1; continue
+                use = min(lot["amount"], remain)
+                book_krw += use * rate
+                cost_krw += use * rate      # 같은 날 매칭 → 0
+                breakdown.append(f"{use:.2f}@same-day")
+                lot["amount"] -= use; remain -= use
+                if lot["amount"] == 0: del lots[i]
+                else: i += 1
+
+            # 2) 잔여는 순수 FIFO
+            i = 0
+            while remain > 0 and i < len(lots):
+                lot = lots[i]
+                use = min(lot["amount"], remain)
+                book_krw += use * rate
+                cost_krw += use * lot["rate"]
+                breakdown.append(f"{use:.2f}@{float(lot['rate']):.2f}({lot['date'].date()})")
+                lot["amount"] -= use; remain -= use
+                if lot["amount"] == 0: del lots[i]
+                else: i += 1
+
+            out.append({
+                "date": date.date(), "desc": desc, "type":"출금",
+                "usd": float(wdr), "book_rate": float(rate),
+                "book_krw": _round_krw(wdr*rate),
+                "fifo_cost_krw": _round_krw(cost_krw),
+                "fx_gain_krw": _round_krw(book_krw - cost_krw),
+                "fifo_breakdown": " + ".join(breakdown)
+            })
+
+    res = pd.DataFrame(out)
+    if not res.empty:
+        res["cum_fx_gain_krw"] = res["fx_gain_krw"].cumsum()
+    return res
+
+# 💱 환차손익(FIFO) 계산 테이블  🔹 추가 블록
+with st.expander("💱 환차손익(FIFO) 계산 테이블", expanded=False):
+    fx_left = load_fx_left_table()
+    st.caption("※ 두번째 탭(좌측 표: 입출금/내용/입금/출금/환율/원화/외화잔액)을 불러와 FIFO로 환차손익을 계산합니다.")
+    fifo_table = compute_fx_fifo_kor(fx_left)
+
+
+    if fifo_table.empty:
+        st.info("두번째 탭에 데이터가 없거나 컬럼명이 맞지 않습니다. (필수: 입출금, 내용, 입금, 출금, 환율)")
+    else:
+        # 🔹 1) 컬럼 한글명으로 변경
+        col_map = {
+            "date": "일자",
+            "desc": "내용",
+            "type": "구분",                 # 입금/출금
+            "usd": "금액(USD)",
+            "book_rate": "적용환율",
+            "book_krw": "장부원화",
+            "fifo_cost_krw": "FIFO원가",
+            "fx_gain_krw": "환차익(원)",
+            "fifo_breakdown": "차감내역(FIFO)",
+            "cum_fx_gain_krw": "누적환차익(원)"
+        }
+        fifo_table = fifo_table.rename(columns=col_map)
+
+        # 🔹 2) 컬럼 순서 통일(원하면)
+        display_cols = [
+            "일자","내용","구분","금액(USD)","적용환율",
+            "장부원화","FIFO원가","환차익(원)","누적환차익(원)","차감내역(FIFO)"
+        ]
+        # 존재하는 컬럼만 유지 (안전장치)
+        display_cols = [c for c in display_cols if c in fifo_table.columns]
+        show = fifo_table[display_cols].copy()
+
+        # 🔹 3) 숫자 포맷
+        for c in ["금액(USD)","적용환율","장부원화","FIFO원가","환차익(원)","누적환차익(원)"]:
+            if c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce")
+        # 쉼표 포맷(원화/환차익 계열)
+        for c in ["장부원화","FIFO원가","환차익(원)","누적환차익(원)"]:
+            if c in show.columns:
+                show[c] = show[c].map(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+        # 달러/환율은 소수 표시 원하면 아래 유지, 아니면 주석 처리
+        if "금액(USD)" in show.columns:
+            show["금액(USD)"] = show["금액(USD)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "")
+        if "적용환율" in show.columns:
+            show["적용환율"] = show["적용환율"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "")
+
+        st.dataframe(show, use_container_width=True)
+
+        # 🔹 4) 총 환차손익 metric (원본 컬럼명 기준으로 계산)
+        total_gain = int(fifo_table["환차익(원)"].str.replace(',', '', regex=True)
+                         .astype(float).sum()
+                         if fifo_table["환차익(원)"].dtype == object
+                         else fifo_table["환차익(원)"].sum())
+        st.metric("총 환차손익(원)", f"{total_gain:,.0f}")
+
+    
