@@ -195,22 +195,19 @@ def make_cost_pivot(df):
 # 2️⃣ 요약표 탭
 with st.expander("📊 요약표 및 비용 항목별 분석", expanded=False):
     tab1, tab2, tab3 = st.tabs([
-        "📅 송금/입금일 기준",
         "🚢 선적일 기준",
+        "📅 송금/입금일 기준",
         "🧾 비용 항목 요약"
     ])
 
     with tab1:
-        st.dataframe(make_summary(df, 기준="송금/입금일"), use_container_width=True)
+        st.dataframe(make_summary(df, 기준="선적일"), use_container_width=True)
 
     with tab2:
-        st.dataframe(make_summary(df, 기준="선적일"), use_container_width=True)
+        st.dataframe(make_summary(df, 기준="송금/입금일"), use_container_width=True)
 
     with tab3:
         st.dataframe(make_cost_pivot(df), use_container_width=True)
-
-
-
 
 
 def render_monthly_summary(df):
@@ -225,6 +222,9 @@ def render_monthly_summary(df):
 
     기준일자 = date_basis
 
+    # ✅ 기준일자에 따라 사용할 금액 컬럼 스위치
+    value_col = "원화(선적일)" if 기준일자 == "선적일" else "원화(송금/입금일)"
+
     # 🔍 거래 필터 및 기준월 파생 (조회기간 포함)
     df_filtered = df[
         (df["거래구분"].isin(["판매", "비용", "구매"])) &
@@ -235,32 +235,37 @@ def render_monthly_summary(df):
 
     df_filtered["기준월"] = pd.to_datetime(df_filtered[기준일자]).dt.to_period("M").astype(str)
 
+    # 📊 월별 집계 (스위치된 금액 컬럼 사용)
+    pivot = (
+        df_filtered.groupby(["기준월", "거래구분"])[value_col]
+        .sum()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
 
-    # 📊 월별 집계
-    summary = df_filtered.groupby(["기준월", "거래구분"])["원화(송금/입금일)"].sum().unstack(fill_value=0).reset_index()
-    summary = summary.rename(columns={"판매": "총 매출", "구매": "총 구매", "비용": "총 비용"})
-    summary["영업이익"] = summary["총 매출"] - summary["총 구매"] - summary["총 비용"]
+    # 누락 가능성 대비 컬럼 보정
+    for c in ["판매", "구매", "비용"]:
+        if c not in pivot.columns:
+            pivot[c] = 0
 
+    # 숫자 계산용(포맷 전)과 표시용(포맷 적용) 분리
+    numeric_summary = pivot.rename(columns={"판매": "총 매출", "구매": "총 구매", "비용": "총 비용"}).copy()
+    numeric_summary["영업이익"] = numeric_summary["총 매출"] - numeric_summary["총 구매"] - numeric_summary["총 비용"]
 
-    # 숫자 포맷 전의 summary 재사용
-    numeric_summary = df_filtered.groupby(["기준월", "거래구분"])["원화(송금/입금일)"].sum().unstack(fill_value=0).reset_index()
-    numeric_summary["영업이익"] = numeric_summary["판매"] - numeric_summary["구매"] - numeric_summary["비용"]
-    numeric_summary = numeric_summary.rename(columns={"판매": "총 매출", "구매": "총 구매", "비용": "총 비용"})
-
-    # 💰 포맷 적용
+    summary = numeric_summary.copy()
     for col in ["총 매출", "총 구매", "총 비용", "영업이익"]:
         summary[col] = summary[col].map(lambda x: f"{x:,.0f}원")
 
-    # ✅ 표 출력
+    # ✅ 표 출력 (현재 기준과 금액 기준 명시)
+    st.caption(f"※ 계산 기준: {기준일자} / 금액 컬럼: {value_col}")
     st.dataframe(summary, use_container_width=True)
 
-
-    # 월을 인덱스로 설정
+    # 📈 차트 데이터: 월을 인덱스로
     chart_df = numeric_summary.set_index("기준월")[["총 매출", "영업이익"]]
 
     # 📊 스트림릿 내장 바 차트
     st.bar_chart(chart_df)
-    
+
 
 
 # 3️⃣ 월별 매출 및 영업이익 추이
