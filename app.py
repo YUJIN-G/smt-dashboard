@@ -209,8 +209,11 @@ with st.expander("📊 요약표 및 비용 항목별 분석", expanded=False):
     with tab3:
         st.dataframe(make_cost_pivot(df), use_container_width=True)
 
+import pandas as pd
+from datetime import datetime
+import streamlit as st
 
-def render_monthly_summary(df):
+def render_monthly_summary(df: pd.DataFrame):
     # 📌 기준일 선택
     col1, col2, col3 = st.columns([1.2, 2, 2])
     with col1:
@@ -225,7 +228,22 @@ def render_monthly_summary(df):
     # ✅ 기준일자에 따라 사용할 금액 컬럼 스위치
     value_col = "원화(선적일)" if 기준일자 == "선적일" else "원화(송금/입금일)"
 
-    # 🔍 거래 필터 및 기준월 파생 (조회기간 포함)
+    # 🔒 안전장치: 필요한 컬럼 유효성
+    required_cols = {"거래구분", 기준일자, value_col}
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        st.error(f"필수 컬럼이 없습니다: {', '.join(missing)}")
+        return
+
+    # 🧼 날짜 컬럼 정규화 (문자/혼합 타입 대비)
+    df = df.copy()
+    df[기준일자] = pd.to_datetime(df[기준일자], errors="coerce")
+
+    # 🗓️ date_input → Timestamp (타입 불일치 방지)
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+
+    # 🔍 거래/기간 필터
     df_filtered = df[
         (df["거래구분"].isin(["판매", "비용", "구매"])) &
         (df[기준일자].notnull()) &
@@ -233,7 +251,13 @@ def render_monthly_summary(df):
         (df[기준일자] <= end_date)
     ].copy()
 
-    df_filtered["기준월"] = pd.to_datetime(df_filtered[기준일자]).dt.to_period("M").astype(str)
+    if df_filtered.empty:
+        st.caption(f"※ 계산 기준: {기준일자} / 금액 컬럼: {value_col}")
+        st.info("선택한 기간과 기준에 해당하는 데이터가 없습니다.")
+        return
+
+    # 🗓️ 기준월 파생
+    df_filtered["기준월"] = df_filtered[기준일자].dt.to_period("M").astype(str)
 
     # 📊 월별 집계 (스위치된 금액 컬럼 사용)
     pivot = (
@@ -248,23 +272,47 @@ def render_monthly_summary(df):
         if c not in pivot.columns:
             pivot[c] = 0
 
-    # 숫자 계산용(포맷 전)과 표시용(포맷 적용) 분리
-    numeric_summary = pivot.rename(columns={"판매": "총 매출", "구매": "총 구매", "비용": "총 비용"}).copy()
-    numeric_summary["영업이익"] = numeric_summary["총 매출"] - numeric_summary["총 구매"] - numeric_summary["총 비용"]
+    # 🚧 수치 집계 테이블
+    numeric_summary = pivot.rename(
+        columns={"판매": "총 매출", "구매": "총 구매", "비용": "총 비용"}
+    ).copy()
+    numeric_summary["영업이익"] = (
+        numeric_summary["총 매출"] - numeric_summary["총 구매"] - numeric_summary["총 비용"]
+    )
 
-    summary = numeric_summary.copy()
+    # 📌 시간순 정렬
+    numeric_summary["_period"] = pd.PeriodIndex(numeric_summary["기준월"], freq="M")
+    numeric_summary = numeric_summary.sort_values("_period").drop(columns=["_period"])
+
+    # 💄 표시용 포맷 (표 내부에는 합계행 없음)
+    display = numeric_summary.copy()
     for col in ["총 매출", "총 구매", "총 비용", "영업이익"]:
-        summary[col] = summary[col].map(lambda x: f"{x:,.0f}원")
+        display[col] = display[col].map(lambda x: f"{x:,.0f}원")
 
-    # ✅ 표 출력 (현재 기준과 금액 기준 명시)
+    # ✅ 표 출력
     st.caption(f"※ 계산 기준: {기준일자} / 금액 컬럼: {value_col}")
-    st.dataframe(summary, use_container_width=True)
+    st.dataframe(display, use_container_width=True)
 
-    # 📈 차트 데이터: 월을 인덱스로
+    # 🧮 합계 요약 (크게, 카드 스타일)
+    grand_sales = numeric_summary["총 매출"].sum()
+    grand_cogs  = numeric_summary["총 구매"].sum()
+    grand_exp   = numeric_summary["총 비용"].sum()
+    grand_op    = numeric_summary["영업이익"].sum()
+    margin_pct  = (grand_op / grand_sales * 100) if grand_sales != 0 else 0.0
+
+    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
+    c1.metric("총 매출", f"{grand_sales:,.0f}원")
+    c2.metric("총 구매", f"{grand_cogs:,.0f}원")
+    c3.metric("총 비용", f"{grand_exp:,.0f}원")
+    c4.metric("영업이익", f"{grand_op:,.0f}원")
+    c5.metric("마진율", f"{margin_pct:,.1f}%")
+    
+    st.markdown("---")
+
+    # 📈 차트 데이터: 월 인덱스로
     chart_df = numeric_summary.set_index("기준월")[["총 매출", "영업이익"]]
-
-    # 📊 스트림릿 내장 바 차트
     st.bar_chart(chart_df)
+
 
 
 
